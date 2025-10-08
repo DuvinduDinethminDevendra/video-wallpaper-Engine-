@@ -1,0 +1,17 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Windows-specific files
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Source code
+*.c text eol=lf
+*.h text eol=lf
+
+# Documentation
+*.md text eol=lf
+
+# Config files
+Makefile text eol=lf
+*.txt text eol=lf
