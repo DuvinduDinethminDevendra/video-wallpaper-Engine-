@@ -1,14 +1,41 @@
 @echo off
-REM Simple batch file to run the video wallpaper engine
-REM Make sure config.txt exists before running
+REM Video Wallpaper Engine - DEBUG MODE
+REM This keeps the console open to see all debug messages
+
+echo =======================================
+echo Video Wallpaper Engine - DEBUG MODE
+echo =======================================
+echo.
 
 if not exist config.txt (
-    echo Error: config.txt not found!
-    echo Please create config.txt with the path to your video file.
-    echo Example: C:\Videos\wallpaper.mp4
+    echo [ERROR] config.txt not found!
+    echo Please create config.txt with the full path to your video file.
     pause
     exit /b 1
 )
 
-echo Starting Video Wallpaper Engine...
+if not exist video_wallpaper.exe (
+    echo [ERROR] video_wallpaper.exe not found!
+    pause
+    exit /b 1
+)
+
+echo Video file: 
+type config.txt
+echo.
+echo.
+echo Starting wallpaper with debug output...
+echo Keep this window open to see debug messages.
+echo Close this window to stop the wallpaper.
+echo.
+echo =======================================
+echo.
+
+REM Run with console visible
 video_wallpaper.exe
+
+echo.
+echo =======================================
+echo Wallpaper stopped.
+echo =======================================
+pause

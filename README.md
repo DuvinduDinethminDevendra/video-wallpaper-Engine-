@@ -7,7 +7,7 @@ Custom video wallpaper engine for Windows 10/11 using C and libVLC for my person
 - 🔄 Automatic looping of video playback
 - 🔇 Silent playback (no audio)
 - 🖥️ Full screen coverage with proper wallpaper integration
-- ⚡ Lightweight C implementation using libVLC
+- ⚡ Lightweight C implementation native Windows APIs.
 
 ## Prerequisites
 

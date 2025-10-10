@@ -1,156 +1,65 @@
+---
+
+## 📦 `INSTALL.md` (Updated)
+
 # Installation and Setup Guide
 
 ## Quick Start Guide
 
-### 1. Install Prerequisites
+### 1. Install a C Compiler
 
-#### Install MinGW-w64 (GCC Compiler)
+The project no longer requires VLC or a specific environment like MSYS2. You only need a C compiler for Windows.
 
-**Option A: Using MSYS2 (Recommended)**
-1. Download MSYS2 from https://www.msys2.org/
-2. Install MSYS2 to default location
-3. Open MSYS2 MINGW64 terminal
-4. Update package database:
-   ```bash
-   pacman -Syu
-   ```
-5. Install gcc and make:
-   ```bash
-   pacman -S mingw-w64-x86_64-gcc make
-   ```
+**Option A: Visual Studio 2022 Build Tools (Recommended)**
+1.  Download the "Build Tools for Visual Studio 2022" from [the official website](https://visualstudio.microsoft.com/visuals-downloads/#build-tools-for-visual-studio-2022).
+2.  Run the installer and select the **"Desktop development with C++"** workload.
+3.  After installation, use the **"Developer Command Prompt for VS 2022"** from your Start Menu for compiling.
 
-**Option B: Standalone MinGW-w64**
-1. Download from https://www.mingw-w64.org/downloads/
-2. Install to a directory (e.g., `C:\mingw64`)
-3. Add `C:\mingw64\bin` to your system PATH
+**Option B: MinGW-w64**
+1.  Download and install a MinGW-w64 toolchain (for example, from [MSYS2](https://www.msys2.org/)).
+2.  Ensure `gcc.exe` is in your system's PATH.
 
-#### Install VLC Media Player
+### 2. Get the Source Code
 
-1. Download VLC from https://www.videolan.org/vlc/
-2. **Important**: Download the installer version (not Microsoft Store version)
-3. Install to default location: `C:\Program Files\VideoLAN\VLC`
-4. During installation, make sure to install the SDK components
+Download or clone the project files to a folder on your computer.
 
-### 2. Download or Clone This Repository
+### 3. Build the Application
 
-```bash
-git clone https://github.com/DuvinduDinethminDevendra/video-wallpaper-Engine-.git
-cd video-wallpaper-Engine-
-```
+1.  Open your chosen command prompt (Developer Prompt for VS or a standard Command Prompt/PowerShell for MinGW).
+2.  Navigate to the folder containing `video_wallpaper.c`.
+3.  Compile the source code.
 
-### 3. Configure Video Path
+    * **If using Visual Studio Compiler:**
+        ```cmd
+        cl video_wallpaper.c /link user32.lib gdi32.lib mf.lib mfplat.lib mfuuid.lib ole32.lib
+        ```
 
-Create `config.txt` from the example:
-```bash
-copy config.txt.example config.txt
-```
+    * **If using MinGW GCC:**
+        ```bash
+        gcc video_wallpaper.c -o video_wallpaper.exe -luser32 -lgdi32 -lmf -lmfplat -lmfuuid -lole32 -mwindows
+        ```
 
-Edit `config.txt` with your video file path:
-```
-C:\Videos\my-wallpaper.mp4
-```
+This will create the `video_wallpaper.exe` file.
 
-### 4. Build the Application
+### 4. Configure and Run
 
-#### Using MSYS2:
-```bash
-make
-```
-
-#### Using Command Prompt with MinGW:
-```cmd
-mingw32-make
-```
-
-If VLC is installed in a non-default location, edit `Makefile` first to update the paths.
-
-### 5. Run the Application
-
-#### Option A: Use the batch file
-```cmd
-run.bat
-```
-
-#### Option B: Run directly
-```cmd
-video_wallpaper.exe
-```
-
-## Verifying Installation
-
-### Check if VLC SDK is available
-
-The libVLC SDK should be in one of these locations:
-- `C:\Program Files\VideoLAN\VLC\sdk\`
-- `C:\Program Files (x86)\VideoLAN\VLC\sdk\`
-
-If not found, you may need to:
-1. Reinstall VLC and ensure SDK is included
-2. Or download VLC development files separately from the VLC website
-
-### Check if MinGW is in PATH
-
-Open Command Prompt and run:
-```cmd
-gcc --version
-```
-
-You should see GCC version information.
+1.  Create a `config.txt` file in the same folder.
+2.  Add the full path to your video file inside `config.txt`, for example: `D:\Videos\MyWallpaper.mp4`.
+3.  Double-click `run.bat` or `video_wallpaper.exe` to start.
 
 ## Troubleshooting Build Issues
 
-### "gcc: command not found"
-- MinGW is not in your PATH
-- Solution: Add MinGW bin directory to system PATH or use MSYS2 terminal
+### "cl' or 'gcc' is not recognized..."
+- Your compiler is not in your system's PATH.
+- **Solution**: If you installed Visual Studio Build Tools, make sure you are using the **"Developer Command Prompt for VS 2022"**, as it automatically sets up the correct paths for you. If using MinGW, add its `bin` folder to your PATH environment variable.
 
-### "vlc/vlc.h: No such file or directory"
-- VLC SDK not found
-- Solution: Update VLC_INCLUDE path in Makefile to point to your VLC installation
-
-### "cannot find -lvlc"
-- VLC library not found
-- Solution: Update VLC_LIB path in Makefile to point to your VLC installation
-
-### Linker errors with libvlc
-- Make sure both `libvlc.dll` and `libvlccore.dll` are accessible
-- These are typically in `C:\Program Files\VideoLAN\VLC\`
-- Copy them to the same directory as `video_wallpaper.exe` or add VLC directory to PATH
+### Linker Errors (e.g., "unresolved external symbol")
+- You forgot to link the necessary libraries.
+- **Solution**: Ensure you are including all the libraries at the end of the compile command (`user32.lib`, `gdi32.lib`, `mf.lib`, etc.).
 
 ## Running at Windows Startup (Optional)
 
-To run the video wallpaper automatically when Windows starts:
-
-1. Press `Win + R` and type `shell:startup`
-2. Create a shortcut to `video_wallpaper.exe` in the Startup folder
-3. Right-click the shortcut → Properties
-4. Set "Start in" to the directory containing your exe and config.txt
-
-## Updating to a New Video
-
-1. Edit `config.txt` with new video path
-2. Kill the current video_wallpaper.exe process
-3. Run video_wallpaper.exe again
-
-Or use this command to restart:
-```cmd
-taskkill /IM video_wallpaper.exe /F && video_wallpaper.exe
-```
-
-## System Requirements
-
-- **OS**: Windows 10 or Windows 11
-- **RAM**: 2GB minimum (4GB+ recommended for HD videos)
-- **CPU**: Any modern x64 processor
-- **Video**: Any video supported by VLC
-  - Recommended: H.264 MP4 for best performance
-  - Resolution: Match your screen resolution for best quality
-
-## Performance Tips
-
-1. Use videos encoded with H.264 for best performance
-2. Match video resolution to your screen resolution
-3. Lower bitrate videos use less CPU
-4. If video stutters, try:
-   - Converting video to lower resolution
-   - Using a more efficient codec (H.264)
-   - Closing other applications
+1.  Press `Win + R`, type `shell:startup`, and press Enter. This opens the Startup folder.
+2.  Create a shortcut to `video_wallpaper.exe` inside this folder.
+3.  Right-click the shortcut and go to **Properties**.
+4.  In the **"Start in"** field, paste the path to the folder where `video_wallpaper.exe` and `config.txt` are located. This is crucial for the program to find its configuration file.
