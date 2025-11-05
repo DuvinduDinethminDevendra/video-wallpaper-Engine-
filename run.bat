@@ -1,4 +1,5 @@
 @echo off
+cd /d "%~dp0"
 REM Video Wallpaper Engine - DEBUG MODE
 REM This keeps the console open to see all debug messages
 

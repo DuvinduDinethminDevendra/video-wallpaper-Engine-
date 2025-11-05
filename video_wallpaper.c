@@ -1,11 +1,12 @@
 /*
- * Video Wallpaper Engine for Windows 10/11
- * Uses Microsoft Media Foundation for video playback and Windows API for wallpaper integration
+ * Video Wallpaper Engine - AGGRESSIVE VISIBILITY METHOD
+ * Forces window visibility with periodic refreshes
  *
  * MIT License - Copyright (c) 2025 B.D.D.Devendra
  */
 
 #include <windows.h>
+#include <dwmapi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,77 +21,328 @@
 #pragma comment(lib, "mfuuid.lib")
 #pragma comment(lib, "mfreadwrite.lib")
 #pragma comment(lib, "evr.lib")
+#pragma comment(lib, "strmiids.lib")
+#pragma comment(lib, "dwmapi.lib")
 
 #define CONFIG_FILE "config.txt"
 #define MAX_PATH_LEN 512
+#define REFRESH_TIMER_ID 1
 
+ // --- Globals ---
 HWND g_hwnd = NULL;
-HWND g_videoHwnd = NULL;
+HWND g_hShellDefView = NULL;
 IMFMediaSession* g_pSession = NULL;
 IMFMediaSource* g_pSource = NULL;
 IMFTopology* g_pTopology = NULL;
 IMFVideoDisplayControl* g_pVideoDisplay = NULL;
+IMFMediaEventGenerator* g_pEventGenerator = NULL;
+BOOL g_bPlaying = FALSE;
 
-int read_config(char* video_path, size_t max_len) {
-    FILE* fp = fopen(CONFIG_FILE, "r");
-    if (!fp) {
-        fprintf(stderr, "Error: Could not open config file '%s'\n", CONFIG_FILE);
-        fprintf(stderr, "Please create a config.txt file with the video file path\n");
-        return 0;
+// --- Function Prototypes ---
+int read_config(char*, size_t);
+LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+HWND create_wallpaper_window(HINSTANCE);
+HRESULT CreateMediaSource(const WCHAR*, IMFMediaSource**);
+HRESULT CreatePlaybackTopology(IMFMediaSource*, IMFTopology**, HWND);
+void cleanup_media_foundation();
+void force_window_refresh();
+
+// --- Force window refresh ---
+void force_window_refresh() {
+    if (g_hwnd && g_pVideoDisplay) {
+        // Force repaint
+        InvalidateRect(g_hwnd, NULL, FALSE);
+        g_pVideoDisplay->RepaintVideo();
+
+        // Ensure proper Z-order
+        if (g_hShellDefView) {
+            SetWindowPos(g_hwnd, g_hShellDefView, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW);
+        }
+    }
+}
+
+// --- Handle media events ---
+HRESULT HandleMediaEvent(IMFMediaEvent* pEvent) {
+    if (!pEvent) return E_POINTER;
+
+    MediaEventType type;
+    HRESULT hr = pEvent->GetType(&type);
+    if (FAILED(hr)) return hr;
+
+    if (type == MESessionEnded) {
+        printf("Looping video...\n");
+        PROPVARIANT varStart;
+        PropVariantInit(&varStart);
+        hr = g_pSession->Start(&GUID_NULL, &varStart);
+        PropVariantClear(&varStart);
+    }
+    return S_OK;
+}
+
+// --- Initialize Media Foundation player ---
+int init_media_foundation_player(HWND hwnd, const char* video_path) {
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    if (FAILED(hr)) return 0;
+
+    hr = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+    if (FAILED(hr)) { CoUninitialize(); return 0; }
+
+    int wide_len = MultiByteToWideChar(CP_UTF8, 0, video_path, -1, NULL, 0);
+    WCHAR* wszURL = (WCHAR*)malloc(wide_len * sizeof(WCHAR));
+    if (!wszURL) { MFShutdown(); CoUninitialize(); return 0; }
+    MultiByteToWideChar(CP_UTF8, 0, video_path, -1, wszURL, wide_len);
+
+    printf("Loading: %s\n", video_path);
+    hr = CreateMediaSource(wszURL, &g_pSource);
+    free(wszURL);
+    if (FAILED(hr)) goto fail;
+
+    hr = MFCreateMediaSession(NULL, &g_pSession);
+    if (FAILED(hr)) goto fail;
+
+    hr = g_pSession->QueryInterface(IID_PPV_ARGS(&g_pEventGenerator));
+
+    hr = CreatePlaybackTopology(g_pSource, &g_pTopology, hwnd);
+    if (FAILED(hr)) goto fail;
+
+    hr = g_pSession->SetTopology(0, g_pTopology);
+    if (FAILED(hr)) goto fail;
+
+    return 1;
+
+fail:
+    cleanup_media_foundation();
+    return 0;
+}
+
+// --- MAIN ---
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        freopen("CONOUT$", "w", stdout);
+        freopen("CONOUT$", "w", stderr);
     }
 
+    printf("\n=== Video Wallpaper - Aggressive Visibility ===\n\n");
+
+    char video_path[MAX_PATH_LEN];
+    if (!read_config(video_path, MAX_PATH_LEN)) {
+        MessageBox(NULL, "Failed to read config.txt", "Error", MB_ICONERROR);
+        return 1;
+    }
+
+    g_hwnd = create_wallpaper_window(hInstance);
+    if (!g_hwnd) {
+        MessageBox(NULL, "Failed to create window", "Error", MB_ICONERROR);
+        return 1;
+    }
+
+    if (!init_media_foundation_player(g_hwnd, video_path)) {
+        MessageBox(NULL, "Failed to initialize player", "Error", MB_ICONERROR);
+        DestroyWindow(g_hwnd);
+        return 1;
+    }
+
+    // Set up refresh timer (every 100ms)
+    SetTimer(g_hwnd, REFRESH_TIMER_ID, 100, NULL);
+
+    MSG msg = { 0 };
+    BOOL bPlayerReady = FALSE;
+
+    printf("Running... Press Ctrl+C to stop.\n\n");
+
+    while (TRUE) {
+        if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) break;
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+        else if (g_pEventGenerator) {
+            IMFMediaEvent* pEvent = NULL;
+            HRESULT hrEvent = g_pEventGenerator->GetEvent(MF_EVENT_FLAG_NO_WAIT, &pEvent);
+
+            if (SUCCEEDED(hrEvent)) {
+                MediaEventType met;
+                pEvent->GetType(&met);
+
+                if (met == MESessionTopologyStatus && !bPlayerReady) {
+                    UINT32 status;
+                    pEvent->GetUINT32(MF_EVENT_TOPOLOGY_STATUS, &status);
+
+                    if (status == MF_TOPOSTATUS_READY) {
+                        printf("Starting playback...\n");
+
+                        HRESULT hrService = MFGetService(g_pSession, MR_VIDEO_RENDER_SERVICE,
+                            IID_PPV_ARGS(&g_pVideoDisplay));
+
+                        if (SUCCEEDED(hrService) && g_pVideoDisplay) {
+                            RECT rc;
+                            GetClientRect(g_hwnd, &rc);
+
+                            g_pVideoDisplay->SetVideoWindow(g_hwnd);
+                            g_pVideoDisplay->SetVideoPosition(NULL, &rc);
+
+                            // Try different aspect ratio modes
+                            g_pVideoDisplay->SetAspectRatioMode(MFVideoARMode_None);
+
+                            SIZE videoSize, aspectRatio;
+                            if (SUCCEEDED(g_pVideoDisplay->GetNativeVideoSize(&videoSize, &aspectRatio))) {
+                                printf("Video: %dx%d\n", videoSize.cx, videoSize.cy);
+                            }
+
+                            PROPVARIANT varStart;
+                            PropVariantInit(&varStart);
+                            g_pSession->Start(&GUID_NULL, &varStart);
+                            PropVariantClear(&varStart);
+
+                            g_bPlaying = TRUE;
+                            printf("SUCCESS! Video is playing.\n");
+                            printf("\nTroubleshooting:\n");
+                            printf("  - Press Win+D to show desktop\n");
+                            printf("  - Hide desktop icons (right-click > View)\n");
+                            printf("  - The video refreshes every 100ms\n\n");
+                        }
+
+                        bPlayerReady = TRUE;
+                    }
+                }
+                else {
+                    HandleMediaEvent(pEvent);
+                }
+                pEvent->Release();
+            }
+            else {
+                Sleep(5);
+            }
+        }
+        else {
+            Sleep(5);
+        }
+    }
+
+    KillTimer(g_hwnd, REFRESH_TIMER_ID);
+    cleanup_media_foundation();
+    return (int)msg.wParam;
+}
+
+// --- Cleanup ---
+void cleanup_media_foundation() {
+    if (g_pSession) {
+        g_pSession->Stop();
+        g_pSession->Close();
+        g_pSession->Release();
+        g_pSession = NULL;
+    }
+    if (g_pVideoDisplay) { g_pVideoDisplay->Release(); g_pVideoDisplay = NULL; }
+    if (g_pTopology) { g_pTopology->Release(); g_pTopology = NULL; }
+    if (g_pSource) { g_pSource->Release(); g_pSource = NULL; }
+    if (g_pEventGenerator) { g_pEventGenerator->Release(); g_pEventGenerator = NULL; }
+    MFShutdown();
+    CoUninitialize();
+}
+
+// --- Read config ---
+int read_config(char* video_path, size_t max_len) {
+    FILE* fp = fopen(CONFIG_FILE, "r");
+    if (!fp) return 0;
     if (fgets(video_path, max_len, fp) == NULL) {
-        fprintf(stderr, "Error: Could not read video path from config file\n");
         fclose(fp);
         return 0;
     }
-
     size_t len = strlen(video_path);
-    if (len > 0 && video_path[len - 1] == '\n') {
-        video_path[len - 1] = '\0';
+    while (len > 0 && (video_path[len - 1] == '\n' || video_path[len - 1] == '\r')) {
+        video_path[--len] = '\0';
     }
-    if (len > 1 && video_path[len - 2] == '\r') {
-        video_path[len - 2] = '\0';
-    }
-
     fclose(fp);
     return 1;
 }
 
-BOOL CALLBACK EnumWindowsProc(HWND tophandle, LPARAM topparamhandle) {
-    HWND shelldll_defview = FindWindowEx(tophandle, NULL, "SHELLDLL_DefView", NULL);
-    if (shelldll_defview != NULL) {
-        HWND* pWorkerw = (HWND*)topparamhandle;
-        *pWorkerw = FindWindowEx(NULL, tophandle, "WorkerW", NULL);
-    }
-    return TRUE;
-}
-
+// --- Window procedure ---
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+    case WM_TIMER:
+        if (wParam == REFRESH_TIMER_ID && g_bPlaying) {
+            force_window_refresh();
+        }
+        return 0;
+
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
+
     case WM_ERASEBKGND:
         return 1;
+
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
+
         if (g_pVideoDisplay) {
-            g_pVideoDisplay->RepaintVideo();
+            // Only repaint video if playing
+            if (g_bPlaying) {
+                g_pVideoDisplay->RepaintVideo();
+            }
         }
+        else {
+            // Draw black background while waiting for video
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            HBRUSH brush = CreateSolidBrush(RGB(0, 0, 0));
+            FillRect(hdc, &rc, brush);
+            DeleteObject(brush);
+        }
+
         EndPaint(hwnd, &ps);
         return 0;
     }
+
     case WM_SIZE:
         if (g_pVideoDisplay) {
             RECT rc;
             GetClientRect(hwnd, &rc);
             g_pVideoDisplay->SetVideoPosition(NULL, &rc);
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
+
+    case WM_DISPLAYCHANGE:
+        if (g_pVideoDisplay) {
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            g_pVideoDisplay->SetVideoPosition(NULL, &rc);
+            InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+// --- Helper: find the WorkerW that hosts SHELLDLL_DefView
+static BOOL CALLBACK EnumWindowsProc_FindWorkerW(HWND top, LPARAM lParam) {
+    char className[64];
+    if (!GetClassNameA(top, className, sizeof(className)))
+        return TRUE;
+    if (strcmp(className, "WorkerW") == 0) {
+        HWND hDefView = FindWindowEx(top, NULL, "SHELLDLL_DefView", NULL);
+        if (hDefView) {
+            *(HWND*)lParam = top;
+            return FALSE; // stop enumeration
+        }
+    }
+    return TRUE; // continue
+}
+
+HWND find_workerw_with_defview() {
+    HWND hProgman = FindWindowA("Progman", NULL);
+    if (!hProgman) return NULL;
+
+    // Ask Progman to spawn a WorkerW with the desktop view
+    SendMessageTimeout(hProgman, 0x052C, 0, 0, SMTO_NORMAL, 1000, NULL);
+    Sleep(100);
+
+    HWND hWorkerW = NULL;
+    EnumWindows(EnumWindowsProc_FindWorkerW, (LPARAM)&hWorkerW);
+    return hWorkerW;
 }
 
 HWND create_wallpaper_window(HINSTANCE hInstance) {
@@ -100,186 +352,124 @@ HWND create_wallpaper_window(HINSTANCE hInstance) {
     wc.hInstance = hInstance;
     wc.lpszClassName = "VideoWallpaperClass";
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
 
-    if (!RegisterClassEx(&wc)) {
-        fprintf(stderr, "Error: Failed to register window class\n");
-        return NULL;
-    }
+    RegisterClassEx(&wc);
 
     int screen_width = GetSystemMetrics(SM_CXSCREEN);
     int screen_height = GetSystemMetrics(SM_CYSCREEN);
+    printf("Screen: %dx%d\n", screen_width, screen_height);
 
-    // Send message to Progman to spawn WorkerW
-    HWND progman = FindWindow("Progman", NULL);
-    SendMessageTimeout(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, NULL);
-
-    // Wait a bit for WorkerW to be created
-    Sleep(100);
-
-    // Find the WorkerW window
-    HWND workerw = NULL;
-    EnumWindows(EnumWindowsProc, (LPARAM)&workerw);
-
-    if (!workerw) {
-        fprintf(stderr, "Warning: Could not find WorkerW, using Progman\n");
-        workerw = progman;
-    }
-
-    // Create our window as a child of WorkerW
-    HWND hwnd = CreateWindowEx(
-        0, "VideoWallpaperClass", "Video Wallpaper",
-        WS_CHILD | WS_VISIBLE,
-        0, 0, screen_width, screen_height,
-        workerw, NULL, hInstance, NULL
-    );
-
-    if (!hwnd) {
-        fprintf(stderr, "Error: Failed to create window (Error: %d)\n", GetLastError());
+    HWND hProgman = FindWindowA("Progman", NULL);
+    if (!hProgman) {
+        printf("ERROR: Cannot find Progman\n");
         return NULL;
     }
 
-    printf("Window created successfully\n");
-    printf("Parent window: %p\n", workerw);
-    printf("Video window: %p\n", hwnd);
+    printf("Found Progman: %p\n", hProgman);
+
+    // Send magic message to create WorkerW
+    HWND hWorkerW = NULL;
+    SendMessageTimeout(hProgman, 0x052C, 0, (LPARAM)&hWorkerW, SMTO_NORMAL, 1000, NULL);
+    Sleep(100);
+
+    // Find or create WorkerW window
+    hWorkerW = FindWindowEx(NULL, NULL, "WorkerW", NULL);
+    if (!hWorkerW) {
+        printf("WARNING: WorkerW not found, using Progman directly\n");
+        hWorkerW = hProgman;
+    }
+    else {
+        printf("Found WorkerW: %p\n", hWorkerW);
+    }
+
+    // Find SHELLDLL_DefView (desktop icons layer)
+    g_hShellDefView = FindWindowEx(hProgman, NULL, "SHELLDLL_DefView", NULL);
+
+    if (g_hShellDefView) {
+        printf("Found desktop icons: %p\n", g_hShellDefView);
+    }
+    else {
+        printf("WARNING: Desktop icons layer not found\n");
+    }
+
+    // Create window as TOP-LEVEL window (not child of Progman)
+    // This allows Media Foundation to render properly
+    HWND hwnd = CreateWindowEx(
+        WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+        "VideoWallpaperClass",
+        "Video Wallpaper",
+        WS_POPUP | WS_VISIBLE,
+        0, 0, screen_width, screen_height,
+        NULL,  // No parent window - top level window
+        NULL,
+        hInstance,
+        NULL
+    );
+
+    if (!hwnd) {
+        printf("ERROR: Failed to create window\n");
+        return NULL;
+    }
+
+    printf("Window created: %p\n", hwnd);
+
+    // Disable DWM transparency
+    BOOL disableTransparency = TRUE;
+    DwmSetWindowAttribute(hwnd, DWMWA_EXCLUDED_FROM_PEEK, &disableTransparency, sizeof(disableTransparency));
 
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
+    // Position behind desktop (on top of Progman/WorkerW, but below desktop icons)
+    if (g_hShellDefView) {
+        SetWindowPos(hwnd, g_hShellDefView, 0, 0, screen_width, screen_height,
+            SWP_NOACTIVATE);
+        printf("Positioned behind desktop icons\n");
+    }
+    else {
+        SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, screen_width, screen_height,
+            SWP_NOACTIVATE);
+    }
+
     return hwnd;
 }
 
+// --- Create media source ---
 HRESULT CreateMediaSource(const WCHAR* sURL, IMFMediaSource** ppSource) {
     MF_OBJECT_TYPE ObjectType = MF_OBJECT_INVALID;
     IMFSourceResolver* pSourceResolver = NULL;
     IUnknown* pSource = NULL;
 
     HRESULT hr = MFCreateSourceResolver(&pSourceResolver);
-    if (FAILED(hr)) {
-        return hr;
-    }
+    if (FAILED(hr)) return hr;
 
-    hr = pSourceResolver->CreateObjectFromURL(
-        sURL,
-        MF_RESOLUTION_MEDIASOURCE,
-        NULL,
-        &ObjectType,
-        &pSource
-    );
+    hr = pSourceResolver->CreateObjectFromURL(sURL, MF_RESOLUTION_MEDIASOURCE,
+        NULL, &ObjectType, &pSource);
 
     if (SUCCEEDED(hr)) {
         hr = pSource->QueryInterface(IID_PPV_ARGS(ppSource));
     }
 
-    if (pSource) {
-        pSource->Release();
-    }
-    if (pSourceResolver) {
-        pSourceResolver->Release();
-    }
-
+    if (pSource) pSource->Release();
+    if (pSourceResolver) pSourceResolver->Release();
     return hr;
 }
 
-HRESULT AddSourceNode(IMFTopology* pTopology, IMFMediaSource* pSource,
-    IMFPresentationDescriptor* pPD, IMFStreamDescriptor* pSD,
-    IMFTopologyNode** ppNode) {
-    IMFTopologyNode* pNode = NULL;
-
-    HRESULT hr = MFCreateTopologyNode(MF_TOPOLOGY_SOURCESTREAM_NODE, &pNode);
-    if (FAILED(hr)) {
-        goto done;
-    }
-
-    hr = pNode->SetUnknown(MF_TOPONODE_SOURCE, pSource);
-    if (FAILED(hr)) {
-        goto done;
-    }
-
-    hr = pNode->SetUnknown(MF_TOPONODE_PRESENTATION_DESCRIPTOR, pPD);
-    if (FAILED(hr)) {
-        goto done;
-    }
-
-    hr = pNode->SetUnknown(MF_TOPONODE_STREAM_DESCRIPTOR, pSD);
-    if (FAILED(hr)) {
-        goto done;
-    }
-
-    hr = pTopology->AddNode(pNode);
-    if (FAILED(hr)) {
-        goto done;
-    }
-
-    *ppNode = pNode;
-    (*ppNode)->AddRef();
-
-done:
-    if (pNode) {
-        pNode->Release();
-    }
-    return hr;
-}
-
-HRESULT AddOutputNode(IMFTopology* pTopology, IMFActivate* pActivate,
-    DWORD dwId, IMFTopologyNode** ppNode) {
-    IMFTopologyNode* pNode = NULL;
-
-    HRESULT hr = MFCreateTopologyNode(MF_TOPOLOGY_OUTPUT_NODE, &pNode);
-    if (FAILED(hr)) {
-        goto done;
-    }
-
-    hr = pNode->SetObject(pActivate);
-    if (FAILED(hr)) {
-        goto done;
-    }
-
-    hr = pNode->SetUINT32(MF_TOPONODE_STREAMID, dwId);
-    if (FAILED(hr)) {
-        goto done;
-    }
-
-    hr = pNode->SetUINT32(MF_TOPONODE_NOSHUTDOWN_ON_REMOVE, FALSE);
-    if (FAILED(hr)) {
-        goto done;
-    }
-
-    hr = pTopology->AddNode(pNode);
-    if (FAILED(hr)) {
-        goto done;
-    }
-
-    *ppNode = pNode;
-    (*ppNode)->AddRef();
-
-done:
-    if (pNode) {
-        pNode->Release();
-    }
-    return hr;
-}
-
+// --- Create playback topology ---
 HRESULT CreatePlaybackTopology(IMFMediaSource* pSource, IMFTopology** ppTopology, HWND hwndVideo) {
     IMFTopology* pTopology = NULL;
     IMFPresentationDescriptor* pPD = NULL;
     DWORD cSourceStreams = 0;
 
     HRESULT hr = MFCreateTopology(&pTopology);
-    if (FAILED(hr)) {
-        goto done;
-    }
+    if (FAILED(hr)) goto done;
 
     hr = pSource->CreatePresentationDescriptor(&pPD);
-    if (FAILED(hr)) {
-        goto done;
-    }
+    if (FAILED(hr)) goto done;
 
     hr = pPD->GetStreamDescriptorCount(&cSourceStreams);
-    if (FAILED(hr)) {
-        goto done;
-    }
-
-    printf("Found %d streams in video\n", cSourceStreams);
+    if (FAILED(hr)) goto done;
 
     for (DWORD i = 0; i < cSourceStreams; i++) {
         IMFStreamDescriptor* pSD = NULL;
@@ -289,62 +479,51 @@ HRESULT CreatePlaybackTopology(IMFMediaSource* pSource, IMFTopology** ppTopology
         BOOL fSelected = FALSE;
 
         hr = pPD->GetStreamDescriptorByIndex(i, &fSelected, &pSD);
+        if (FAILED(hr) || !fSelected) {
+            if (pSD) pSD->Release();
+            continue;
+        }
+
+        GUID majorType;
+        IMFMediaTypeHandler* pHandler = NULL;
+        pSD->GetMediaTypeHandler(&pHandler);
+        pHandler->GetMajorType(&majorType);
+        pHandler->Release();
+
+        if (majorType == MFMediaType_Video) {
+            hr = MFCreateVideoRendererActivate(hwndVideo, &pSinkActivate);
+        }
+        else if (majorType == MFMediaType_Audio) {
+            hr = MFCreateAudioRendererActivate(&pSinkActivate);
+        }
+        else {
+            pPD->DeselectStream(i);
+            pSD->Release();
+            continue;
+        }
+
         if (FAILED(hr)) {
-            goto loop_done;
+            pSD->Release();
+            goto done;
         }
 
-        if (fSelected) {
-            hr = AddSourceNode(pTopology, pSource, pPD, pSD, &pSourceNode);
-            if (FAILED(hr)) {
-                goto loop_done;
-            }
+        MFCreateTopologyNode(MF_TOPOLOGY_SOURCESTREAM_NODE, &pSourceNode);
+        pSourceNode->SetUnknown(MF_TOPONODE_SOURCE, pSource);
+        pSourceNode->SetUnknown(MF_TOPONODE_PRESENTATION_DESCRIPTOR, pPD);
+        pSourceNode->SetUnknown(MF_TOPONODE_STREAM_DESCRIPTOR, pSD);
+        pTopology->AddNode(pSourceNode);
 
-            GUID majorType;
-            IMFMediaTypeHandler* pHandler = NULL;
-            hr = pSD->GetMediaTypeHandler(&pHandler);
-            if (SUCCEEDED(hr)) {
-                hr = pHandler->GetMajorType(&majorType);
-                pHandler->Release();
-            }
+        MFCreateTopologyNode(MF_TOPOLOGY_OUTPUT_NODE, &pOutputNode);
+        pOutputNode->SetObject(pSinkActivate);
+        pOutputNode->SetUINT32(MF_TOPONODE_STREAMID, 0);
+        pTopology->AddNode(pOutputNode);
 
-            if (FAILED(hr)) {
-                goto loop_done;
-            }
+        pSourceNode->ConnectOutput(0, pOutputNode, 0);
 
-            if (majorType == MFMediaType_Video) {
-                printf("Creating video renderer for stream %d\n", i);
-                hr = MFCreateVideoRendererActivate(hwndVideo, &pSinkActivate);
-            }
-            else if (majorType == MFMediaType_Audio) {
-                printf("Creating audio renderer for stream %d\n", i);
-                hr = MFCreateAudioRendererActivate(&pSinkActivate);
-            }
-            else {
-                printf("Skipping unknown stream type\n");
-                hr = E_FAIL;
-            }
-
-            if (FAILED(hr)) {
-                goto loop_done;
-            }
-
-            hr = AddOutputNode(pTopology, pSinkActivate, 0, &pOutputNode);
-            if (FAILED(hr)) {
-                goto loop_done;
-            }
-
-            hr = pSourceNode->ConnectOutput(0, pOutputNode, 0);
-        }
-
-    loop_done:
         if (pSD) pSD->Release();
         if (pSinkActivate) pSinkActivate->Release();
         if (pSourceNode) pSourceNode->Release();
         if (pOutputNode) pOutputNode->Release();
-
-        if (FAILED(hr)) {
-            break;
-        }
     }
 
     if (SUCCEEDED(hr)) {
@@ -356,187 +535,4 @@ done:
     if (pTopology) pTopology->Release();
     if (pPD) pPD->Release();
     return hr;
-}
-
-HRESULT GetVideoDisplayControl(IMFMediaSession* pSession, IMFVideoDisplayControl** ppVideoDisplay) {
-    HRESULT hr = S_OK;
-    IMFGetService* pGetService = NULL;
-
-    hr = MFGetService(pSession, MR_VIDEO_RENDER_SERVICE, IID_PPV_ARGS(ppVideoDisplay));
-
-    return hr;
-}
-
-int init_media_foundation_player(HWND hwnd, const char* video_path) {
-    HRESULT hr;
-
-    hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    if (FAILED(hr)) {
-        fprintf(stderr, "Error: Failed to initialize COM (0x%08X)\n", hr);
-        return 0;
-    }
-
-    hr = MFStartup(MF_VERSION, MFSTARTUP_FULL);
-    if (FAILED(hr)) {
-        fprintf(stderr, "Error: Failed to start Media Foundation (0x%08X)\n", hr);
-        CoUninitialize();
-        return 0;
-    }
-
-    int wide_len = MultiByteToWideChar(CP_UTF8, 0, video_path, -1, NULL, 0);
-    WCHAR* wszURL = (WCHAR*)malloc(wide_len * sizeof(WCHAR));
-    MultiByteToWideChar(CP_UTF8, 0, video_path, -1, wszURL, wide_len);
-
-    printf("Loading video: %s\n", video_path);
-
-    hr = CreateMediaSource(wszURL, &g_pSource);
-    free(wszURL);
-
-    if (FAILED(hr)) {
-        fprintf(stderr, "Error: Failed to create media source (0x%08X)\n", hr);
-        fprintf(stderr, "Please check if the video file exists and is a valid format\n");
-        MFShutdown();
-        CoUninitialize();
-        return 0;
-    }
-
-    printf("Media source created\n");
-
-    hr = MFCreateMediaSession(NULL, &g_pSession);
-    if (FAILED(hr)) {
-        fprintf(stderr, "Error: Failed to create media session (0x%08X)\n", hr);
-        g_pSource->Release();
-        MFShutdown();
-        CoUninitialize();
-        return 0;
-    }
-
-    printf("Media session created\n");
-
-    hr = CreatePlaybackTopology(g_pSource, &g_pTopology, hwnd);
-    if (FAILED(hr)) {
-        fprintf(stderr, "Error: Failed to create topology (0x%08X)\n", hr);
-        g_pSession->Release();
-        g_pSource->Release();
-        MFShutdown();
-        CoUninitialize();
-        return 0;
-    }
-
-    printf("Topology created\n");
-
-    hr = g_pSession->SetTopology(0, g_pTopology);
-    if (FAILED(hr)) {
-        fprintf(stderr, "Error: Failed to set topology (0x%08X)\n", hr);
-        g_pTopology->Release();
-        g_pSession->Release();
-        g_pSource->Release();
-        MFShutdown();
-        CoUninitialize();
-        return 0;
-    }
-
-    printf("Topology set, waiting for ready...\n");
-    Sleep(500);
-
-    // Get video display control
-    hr = GetVideoDisplayControl(g_pSession, &g_pVideoDisplay);
-    if (SUCCEEDED(hr) && g_pVideoDisplay) {
-        printf("Got video display control\n");
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-        g_pVideoDisplay->SetVideoPosition(NULL, &rc);
-        g_pVideoDisplay->SetAspectRatioMode(MFVideoARMode_PreservePicture);
-    }
-
-    PROPVARIANT varStart;
-    PropVariantInit(&varStart);
-    hr = g_pSession->Start(&GUID_NULL, &varStart);
-    PropVariantClear(&varStart);
-
-    if (FAILED(hr)) {
-        fprintf(stderr, "Error: Failed to start playback (0x%08X)\n", hr);
-        if (g_pVideoDisplay) g_pVideoDisplay->Release();
-        g_pTopology->Release();
-        g_pSession->Release();
-        g_pSource->Release();
-        MFShutdown();
-        CoUninitialize();
-        return 0;
-    }
-
-    printf("Playback started successfully!\n");
-    return 1;
-}
-
-void cleanup_media_foundation() {
-    if (g_pSession) {
-        g_pSession->Stop();
-        Sleep(100);
-        g_pSession->Close();
-        g_pSession->Release();
-        g_pSession = NULL;
-    }
-    if (g_pVideoDisplay) {
-        g_pVideoDisplay->Release();
-        g_pVideoDisplay = NULL;
-    }
-    if (g_pTopology) {
-        g_pTopology->Release();
-        g_pTopology = NULL;
-    }
-    if (g_pSource) {
-        g_pSource->Release();
-        g_pSource = NULL;
-    }
-    MFShutdown();
-    CoUninitialize();
-}
-
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
-    LPSTR lpCmdLine, int nCmdShow) {
-
-    // Attach to parent console if running from batch file
-    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
-        freopen("CONOUT$", "w", stdout);
-        freopen("CONOUT$", "w", stderr);
-        printf("\n"); // Move to new line after batch echo
-    }
-
-    char video_path[MAX_PATH_LEN];
-
-    if (!read_config(video_path, MAX_PATH_LEN)) {
-        MessageBox(NULL, "Failed to read config file. Please create config.txt with video path.", "Error", MB_ICONERROR);
-        return 1;
-    }
-
-    printf("=================================\n");
-    printf("Video Wallpaper Engine Starting\n");
-    printf("=================================\n");
-    printf("Video file: %s\n", video_path);
-
-    g_hwnd = create_wallpaper_window(hInstance);
-    if (!g_hwnd) {
-        MessageBox(NULL, "Failed to create wallpaper window", "Error", MB_ICONERROR);
-        return 1;
-    }
-
-    if (!init_media_foundation_player(g_hwnd, video_path)) {
-        MessageBox(NULL, "Failed to initialize video player with Media Foundation", "Error", MB_ICONERROR);
-        DestroyWindow(g_hwnd);
-        return 1;
-    }
-
-    printf("\nVideo wallpaper is now running!\n");
-    printf("Press Ctrl+C in this console to exit\n");
-
-    MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
-    }
-
-    cleanup_media_foundation();
-
-    return (int)msg.wParam;
 }
